@@ -1,0 +1,92 @@
+SPARK CODE FOR BALANCING AND IMPLEMENTING RANDOM FOREST ALGORITHM 
+
+
+REFERENCE: http://blog.madhukaraphatak.com/class-imbalance-part-3/
+
+
+
+#creating a directory
+hadoop fs -mkdir /BigData
+
+#copying data from local
+hadoop fs -copyFromLocal COVID-19.csv /BigData/.
+
+#importing libraries
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.expressions.Window
+import org.apache.spark.ml.feature.{VectorAssembler, StringIndexer}
+import org.apache.spark.ml.Pipeline
+import org.apache.spark.ml.classification.{RandomForestClassificationModel, RandomForestClassifier}
+import org.apache.spark.ml.tuning.{CrossValidator, CrossValidatorModel, ParamGridBuilder}
+import org.apache.spark.ml.evaluation.{MulticlassClassificationEvaluator}
+import org.apache.spark.ml.param.ParamMap
+import org.apache.spark.sql.types.{IntegerType, DoubleType}
+
+#storing dataset into a variable
+val results = spark.read
+ .format("csv")
+ .option("header", "true")
+ .load("hdfs://10.128.0.7:8020/BigData/COVID-19.csv")
+
+
+
+#BALANCING THE DATASET
+
+#getting data with fatal outcome
+val fatal = results.filter(col("Outcome") === "FATAL")
+
+#getting data with resolved outcome
+val resolved = results.filter(col("Outcome") === "RESOLVED")
+
+#getting data with active outcome
+val active = results.filter(col("Outcome") === "ACTIVE")
+
+#merging resolved and active outcome
+val resolved_active = resolved.unionAll(active)
+
+#getting sample ratio of fatal
+val sampleRatio = fatal.count().toDouble / results.count().toDouble
+
+#getting same amount of data from resolved_active as of fatal by using predicted sampleratio of fatal
+val resolved_active_Sample = resolved_active.sample(false, sampleRatio)
+
+#merging the fatal data with equal amount of resolved_active data for random forest algorithm
+fatal.unionAll(resolved_active_Sample)
+
+
+
+#PERFORMING RANDOM FOREST ALGORITHM
+
+val underSampleData = fatal.select(col("Outcome"),col("Source of Infection").cast(DoubleType), 
+ col("Currently Intubated").cast(DoubleType), 
+ col("Ever Hospitalized").cast(DoubleType),col("Ever in ICU").cast(DoubleType),
+ col("Age Group").cast(DoubleType),col("Client Gender").cast(DoubleType))
+val Array(trainingData, testData) = underSampleData.randomSplit(Array(0.8, 0.2), 754)
+val indexer = new StringIndexer()
+  .setInputCol("Outcome")
+  .setOutputCol("Outcome_inx") 
+val assembler = new VectorAssembler()
+ .setInputCols(Array("Currently Intubated","Source of Infection","Ever Hospitalized","Ever in ICU","Age Group","Client Gender"))
+ .setOutputCol("assembled-features")
+val rf = new RandomForestClassifier()
+ .setFeaturesCol("assembled-features")
+ .setLabelCol("Outcome_inx")
+ .setSeed(1234)
+val pipeline = new Pipeline()
+.setStages(Array(indexer,assembler,rf))
+val evaluator = new MulticlassClassificationEvaluator()
+  .setLabelCol("Outcome_inx")
+  .setPredictionCol("prediction")
+  .setMetricName("accuracy")
+ val paramGrid = new ParamGridBuilder()  
+  .addGrid(rf.maxDepth, Array(3, 5))
+  .addGrid(rf.impurity, Array("entropy","gini")).build()
+ val cross_validator = new CrossValidator()
+  .setEstimator(pipeline)
+  .setEvaluator(evaluator)
+  .setEstimatorParamMaps(paramGrid)
+  .setNumFolds(3)
+val cvModel = cross_validator.fit(trainingData)
+val predictions = cvModel.transform(testData)
+val accuracy = evaluator.evaluate(predictions)
+println("accuracy on test data = " + accuracy)
